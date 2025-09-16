@@ -1,5 +1,5 @@
 # ===============================
-# Telegram-бот: 1 пост в день (Google Sheets + текст всегда обязательный)
+# Telegram-бот с webhook для Render
 # ===============================
 
 import os
@@ -9,26 +9,18 @@ import random
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
-import threading
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-    InputMediaVideo,
-    Update,
-    constants,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
-    filters,
+    CallbackQueryHandler,
     ContextTypes,
+    filters,
 )
 
 # ✅ Берём все переменные из config.py
@@ -40,7 +32,7 @@ from config import (
 print("🔥 bot.py запустился")
 
 # ===============================
-# Flask для Render Web Service
+# Flask для Render
 # ===============================
 from flask import Flask
 flask_app = Flask(__name__)
@@ -48,13 +40,6 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port)
-
-# Запускаем Flask в отдельном потоке сразу
-threading.Thread(target=run_flask).start()
 
 # ===============================
 # Google Sheets
@@ -74,18 +59,6 @@ else:
     print("⚠️ GOOGLE_CREDENTIALS не задан — доступ к Google Sheets отключён")
 
 MEDIA_CSV = "media_store.csv"
-
-SHEET_GIDS = {
-    "Posts": "0",
-    "Media": "854430773",
-    "Ideas": "1938592340"
-}
-
-def get_sheet_url(sheet_name: str) -> str:
-    gid = SHEET_GIDS.get(sheet_name)
-    if gid:
-        return f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid={gid}"
-    return f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit"
 
 def load_json(path: str, default):
     if not os.path.exists(path):
@@ -131,46 +104,6 @@ def fetch_posts_from_sheets() -> List[Dict[str, Any]]:
     return posts
 
 # ===============================
-# keyboard
-# ===============================
-def build_keyboard(post: Dict[str, Any]) -> Optional[InlineKeyboardMarkup]:
-    btns = post.get("buttons")
-    if not btns:
-        return None
-    rows = [[InlineKeyboardButton(text=b["text"], url=b["url"]) for b in btns]]
-    return InlineKeyboardMarkup(rows)
-
-# ===============================
-# отправка поста
-# ===============================
-async def send_post(ctx: ContextTypes.DEFAULT_TYPE, post: Dict[str, Any]):
-    chat_id = TARGET_CHAT_ID
-    kb = build_keyboard(post)
-    disable_notif = bool(post.get("disable_notification", False))
-    ptype = post.get("type")
-    text = post.get("text", "")
-
-    if ptype == "text":
-        await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb,
-                                   disable_notification=disable_notif, parse_mode=constants.ParseMode.HTML)
-    elif ptype == "photo":
-        await ctx.bot.send_photo(chat_id=chat_id, photo=post["media"], caption=text, reply_markup=kb,
-                                 disable_notification=disable_notif, parse_mode=constants.ParseMode.HTML)
-    elif ptype == "video":
-        await ctx.bot.send_video(chat_id=chat_id, video=post["media"], caption=text, reply_markup=kb,
-                                 disable_notification=disable_notif, parse_mode=constants.ParseMode.HTML)
-    elif ptype == "audio":
-        await ctx.bot.send_audio(chat_id=chat_id, audio=post["media"], caption=text, reply_markup=kb,
-                                 disable_notification=disable_notif, parse_mode=constants.ParseMode.HTML)
-    elif ptype == "voice":
-        await ctx.bot.send_voice(chat_id=chat_id, voice=post["media"], caption=text, reply_markup=kb,
-                                 disable_notification=disable_notif, parse_mode=constants.ParseMode.HTML)
-    elif ptype == "document":
-        await ctx.bot.send_document(chat_id=chat_id, document=post["media"], caption=text, reply_markup=kb,
-                                    disable_notification=disable_notif, parse_mode=constants.ParseMode.HTML)
-    # Дополнительные типы (album, poll и т.д.) можно добавить по аналогии
-
-# ===============================
 # очередь постов
 # ===============================
 class Queue:
@@ -207,7 +140,7 @@ class Queue:
 queue = Queue(POSTS_FILE, STATE_FILE, RANDOM_ORDER)
 
 # ===============================
-# обработка файлов (file_id)
+# обработка файлов
 # ===============================
 async def file_id_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -226,21 +159,38 @@ async def file_id_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"File ID: {file_id}")
 
 # ===============================
+# отправка поста
+# ===============================
+async def send_post(ctx: ContextTypes.DEFAULT_TYPE, post: Dict[str, Any]):
+    chat_id = TARGET_CHAT_ID
+    text = post.get("text", "")
+    await ctx.bot.send_message(chat_id=chat_id, text=text)
+
+# ===============================
 # main
 # ===============================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # команды
-    app.add_handler(CommandHandler("next", lambda u, c: send_post(c, queue.next_post())))
-    app.add_handler(CommandHandler("status", lambda u, c: c.bot.send_message(chat_id=TARGET_CHAT_ID, text="Bot работает")))
-    app.add_handler(MessageHandler(filters.ALL, file_id_handler))
+    application.add_handler(CommandHandler("next", lambda u, c: send_post(c, queue.next_post())))
+    application.add_handler(CommandHandler("status", lambda u, c: c.bot.send_message(chat_id=TARGET_CHAT_ID, text="Bot работает")))
+    application.add_handler(MessageHandler(filters.ALL, file_id_handler))
+
+    # ===============================
+    # webhook для Render
+    # ===============================
+    port = int(os.environ.get("PORT", 5000))
+    url_path = BOT_TOKEN
+    render_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{url_path}"
+    application.bot.set_webhook(render_url)
 
     print(f"Bot started. Time: {POST_TIME} TZ={TZ} Chat={TARGET_CHAT_ID}")
-    app.run_polling()
+    print("✅ main() дошёл до запуска")
+    application.run_webhook(listen="0.0.0.0", port=port, url_path=url_path)
 
 # ===============================
-# Запуск
+# запуск
 # ===============================
 if __name__ == "__main__":
     main()
