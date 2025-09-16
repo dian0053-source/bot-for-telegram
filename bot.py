@@ -45,6 +45,21 @@ from config import (
     ADMIN_IDS, CREDENTIALS_FILE, POSTS_FILE, STATE_FILE, RANDOM_ORDER
 )
 
+# Берём JSON из переменной окружения
+google_credentials = os.getenv("GOOGLE_CREDENTIALS")
+
+if google_credentials:
+    creds_dict = json.loads(google_credentials)
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+else:
+    creds = None
+    client = None
+    print("⚠️ GOOGLE_CREDENTIALS не задан — доступ к Google Sheets отключён")
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # 📌 gid для каждого листа (замени на реальные gid из URL)
