@@ -1,5 +1,5 @@
 # ===============================
-# Telegram-бот с webhook для Render
+# Telegram-бот: 1 пост в день (Google Sheets + text всегда обязательный)
 # ===============================
 
 import os
@@ -8,38 +8,35 @@ import csv
 import random
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List, Optional
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Update,
+    constants,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
 
-# ✅ Берём все переменные из config.py
+# ===============================
+# Конфиг
+# ===============================
 from config import (
     BOT_TOKEN, TARGET_CHAT_ID, SPREADSHEET_ID, POST_TIME, TZ,
     ADMIN_IDS, CREDENTIALS_FILE, POSTS_FILE, STATE_FILE, RANDOM_ORDER
 )
-
-print("🔥 bot.py запустился")
-
-# ===============================
-# Flask для Render
-# ===============================
-from flask import Flask
-flask_app = Flask(__name__)
-
-@flask_app.route("/")
-def home():
-    return "Bot is running!"
 
 # ===============================
 # Google Sheets
@@ -58,21 +55,12 @@ else:
     client = None
     print("⚠️ GOOGLE_CREDENTIALS не задан — доступ к Google Sheets отключён")
 
+SHEET_GIDS = {
+    "Posts": "0",
+    "Media": "854430773",
+    "Ideas": "1938592340"
+}
 MEDIA_CSV = "media_store.csv"
-
-def load_json(path: str, default):
-    if not os.path.exists(path):
-        return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_json(path: str, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def parse_time(hhmm: str) -> time:
-    hh, mm = [int(x) for x in hhmm.split(":")]
-    return time(hour=hh, minute=mm, tzinfo=ZoneInfo(TZ))
 
 def get_gs_client():
     if not SPREADSHEET_ID or not os.path.exists(CREDENTIALS_FILE):
@@ -86,7 +74,10 @@ def fetch_posts_from_sheets() -> List[Dict[str, Any]]:
     client = get_gs_client()
     if not client:
         return []
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Posts")
+    try:
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Posts")
+    except Exception:
+        return []
     rows = sheet.get_all_records()
     posts = []
     for row in rows:
@@ -104,7 +95,7 @@ def fetch_posts_from_sheets() -> List[Dict[str, Any]]:
     return posts
 
 # ===============================
-# очередь постов
+# Queue
 # ===============================
 class Queue:
     def __init__(self, posts_file: str, state_file: str, random_order: bool):
@@ -131,66 +122,112 @@ class Queue:
     def next_post(self) -> Optional[Dict[str, Any]]:
         if not self.posts:
             return None
+        dated_posts = [p for p in self.posts if p.get("datetime")]
+        now = datetime.now(ZoneInfo(TZ))
+        for p in dated_posts:
+            try:
+                dt = datetime.fromisoformat(p["datetime"])
+                if now >= dt:
+                    return p
+            except Exception:
+                continue
+        if self.random:
+            return random.choice(self.posts)
         idx = self.state["index"] % len(self.posts)
         post = self.posts[idx]
         self.state["index"] = idx + 1
         self.save()
         return post
 
+def load_json(path: str, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 queue = Queue(POSTS_FILE, STATE_FILE, RANDOM_ORDER)
 
 # ===============================
-# обработка файлов
+# Keyboard
 # ===============================
-async def file_id_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if msg.photo:
-        file_id = msg.photo[-1].file_id
-    elif msg.video:
-        file_id = msg.video.file_id
-    elif msg.audio:
-        file_id = msg.audio.file_id
-    elif msg.voice:
-        file_id = msg.voice.file_id
-    elif msg.document:
-        file_id = msg.document.file_id
-    else:
-        return
-    await msg.reply_text(f"File ID: {file_id}")
+def build_keyboard(post: Dict[str, Any]) -> Optional[InlineKeyboardMarkup]:
+    btns = post.get("buttons")
+    if not btns:
+        return None
+    rows = [[InlineKeyboardButton(text=b["text"], url=b["url"]) for b in btns]]
+    return InlineKeyboardMarkup(rows)
 
 # ===============================
-# отправка поста
+# Send post
 # ===============================
 async def send_post(ctx: ContextTypes.DEFAULT_TYPE, post: Dict[str, Any]):
     chat_id = TARGET_CHAT_ID
+    kb = build_keyboard(post)
     text = post.get("text", "")
-    await ctx.bot.send_message(chat_id=chat_id, text=text)
+    ptype = post.get("type")
+
+    if ptype == "text":
+        await ctx.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=constants.ParseMode.HTML)
+    elif ptype == "photo":
+        await ctx.bot.send_photo(chat_id, photo=post["media"], caption=text, reply_markup=kb)
+    elif ptype == "video":
+        await ctx.bot.send_video(chat_id, video=post["media"], caption=text, reply_markup=kb)
+    elif ptype == "audio":
+        await ctx.bot.send_audio(chat_id, audio=post["media"], caption=text, reply_markup=kb)
+    elif ptype == "voice":
+        await ctx.bot.send_voice(chat_id, voice=post["media"], caption=text, reply_markup=kb)
+    elif ptype == "document":
+        await ctx.bot.send_document(chat_id, document=post["media"], caption=text, reply_markup=kb)
+    elif ptype == "album":
+        media_items = []
+        for m in post.get("media", []):
+            if m.get("type") == "photo":
+                media_items.append(InputMediaPhoto(m["file"], caption=text))
+            elif m.get("type") == "video":
+                media_items.append(InputMediaVideo(m["file"], caption=text))
+        if media_items:
+            await ctx.bot.send_media_group(chat_id, media_items)
+    elif ptype in ("poll", "image_poll"):
+        await ctx.bot.send_poll(chat_id, question=text, options=post.get("options", []))
+    else:
+        await ctx.bot.send_message(chat_id, text=f"[Ошибка] Неизвестный тип: {ptype}")
 
 # ===============================
-# main
+# Admin commands
+# ===============================
+async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    post = queue.next_post()
+    if post:
+        await send_post(context, post)
+        await update.message.reply_text("Отправлено")
+    else:
+        await update.message.reply_text("Нет постов")
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Бот работает. Постов: {len(queue.posts)}")
+
+async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    queue.reload()
+    await update.message.reply_text("Посты перезагружены")
+
+# ===============================
+# Main
 # ===============================
 def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # команды
-    application.add_handler(CommandHandler("next", lambda u, c: send_post(c, queue.next_post())))
-    application.add_handler(CommandHandler("status", lambda u, c: c.bot.send_message(chat_id=TARGET_CHAT_ID, text="Bot работает")))
-    application.add_handler(MessageHandler(filters.ALL, file_id_handler))
+    app.add_handler(CommandHandler("next", cmd_next))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("reload", cmd_reload))
 
-    # ===============================
-    # webhook для Render
-    # ===============================
-    port = int(os.environ.get("PORT", 5000))
-    url_path = BOT_TOKEN
-    render_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{url_path}"
-    application.bot.set_webhook(render_url)
-
+    # Polling запускает бота на бесплатном Render
     print(f"Bot started. Time: {POST_TIME} TZ={TZ} Chat={TARGET_CHAT_ID}")
     print("✅ main() дошёл до запуска")
-    application.run_webhook(listen="0.0.0.0", port=port, url_path=url_path)
+    app.run_polling()
 
-# ===============================
-# запуск
-# ===============================
 if __name__ == "__main__":
     main()
